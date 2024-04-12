@@ -1,5 +1,7 @@
 # multi-volume-backup
 
+中文介绍 | [English](./README.md)
+
 一个基于 `tar` 的智能多卷备份脚本。
 
 ## 动机

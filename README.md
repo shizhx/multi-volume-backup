@@ -1,5 +1,7 @@
 # multi-volume-backup
 
+[中文介绍](./README_zh_CN.md) | English
+
 A smart multi-volume backup script based on `tar`.
 
 ## Motivation
