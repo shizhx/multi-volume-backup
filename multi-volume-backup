@@ -1,0 +1,171 @@
+#!/bin/bash
+# A smart multi-volume backup script based on `tar`.
+
+prog=$0
+prog_name=$(basename "$0")
+cmd=$1
+
+MVB_WORK_DIR=${MVB_WORK_DIR:-"/tmp"}
+MVB_CMD=${MVB_CMD:-""}
+if [ -z "$cmd" ]; then
+    cmd=$MVB_CMD
+else
+    shift
+fi
+
+usage() {
+    echo "Usage:"
+    echo "  $prog_name backup <source path> <dest path with volume name prefix> <volume size> <snar file path>"
+    echo "  $prog_name restore <source path with volume name prefix> <dest path>"
+    echo
+    echo "Note:"
+    echo "  snar file record the filelist to achive incremental backup"
+    echo
+    echo "Example:"
+    echo "  multi-volume-backup backup /data /mnt/bak/full_backup- 100G /data.snar"
+    echo "  multi-volume-backup restore /mnt/bak/full_backup- /data"
+    exit 1
+}
+
+log_tag=""
+__log_impl() {
+    local now
+    now=$(date "+%Y-%m-%d %H:%M:%S")
+
+    echo "$now $*"
+}
+
+logi() {
+    __log_impl "INFO" "[$log_tag] $*"
+}
+
+loge() {
+    __log_impl "ERROR" "[$log_tag] $*"
+}
+
+logf() {
+    __log_impl "FATAL" "[$log_tag] $*"
+    exit 2
+}
+
+
+do_backup() {
+    log_tag="backup-main"
+    local src=$1
+    local dst_prefix=$2
+    local size=$3
+    local snar=$4
+
+    # check argument
+    local dst_dir
+    local snar_dir
+
+    dst_dir=$(dirname "$dst_prefix")
+    snar_dir=$(dirname "$snar")
+
+    [ -d "$src" ] || logf "Invalid source path: $src"
+    [ -d "$dst_dir" ] || logf "Invalid dest path $dst_prefix"
+    [ -n "$size" ] || logf "Invalid volume size: $size"
+    [ -d "$snar_dir" ] || logf "Invalid snar file: $snar"
+
+    # create pipe to recv data and signal
+    mkdir -p "$MVB_WORK_DIR" || logf "Failed to create workdir: $MVB_WORK_DIR"
+    local data_channel="$MVB_WORK_DIR/mv-backup-data"
+    local signal_channel="$MVB_WORK_DIR/mv-backup-signal"
+    mkfifo "$data_channel" || logf "Failed to create data channel: $data_channel"
+    mkfifo "$signal_channel" || logf "Failed to create signal channel: $signal_channel"
+
+    # writer
+    logi "Starting backgroud writer to receive data and write to $dst_dir"
+    "$prog" __recv "$dst_prefix" "$data_channel" "$signal_channel" &
+    writer_pid=$!
+
+    if ! timeout 10 cat "$signal_channel"; then
+        logf "Failed to start backgroud writer"
+    fi
+
+    # reader
+    logi "Starting backgroud reader(tar) to read data and write to data channel"
+    # use environment variables to pass arguments to tar script
+    MVB_CMD="__change_volume" \
+    MVB_DST_DIR="$dst_dir" \
+    MVB_VOL_SIZE="$size" \
+    MVB_SIGNAL_CH="$signal_channel" \
+    tar -cM -v -H posix -L "$size" -F "$prog" -f "$data_channel" -g "$snar" "$src" > "$MVB_WORK_DIR/tar.log" &
+    local reader_pid=$!
+
+    # wait any worker exit
+    # TODO
+    logi "Waiting for reader complete"
+    wait "$reader_pid"
+
+    # notify writer complete
+    logi "Backgroud reader exit with code $?, notify writer"
+    echo "DONE" > "$signal_channel"
+    if ! timeout 10 wait "$writer_pid"; then
+        logi "Writer not exit after timeout, kill it(pid=$writer_pid)"
+        kill -9 "$writer_pid"
+    fi
+
+    logi "Good Bye!"
+}
+
+do_recv() {
+    log_tag="backup-writer"
+    local dst_prefix=$1
+    local data_channel=$2
+    local signal_channel=$3
+    local vol_num=1
+
+    logi "Writer worker started, notify main process"
+    echo "WRITER_STARTED" > "$signal_channel" || logf "Failed to notify main process, exit"
+
+    while true; do
+        local dst="${dst_prefix}${vol_num}.tar"
+        logi "Begin to receive data and write to $dst"
+        local checksum
+        checksum=$(tee "$dst" < "$data_channel" | sha256sum | awk '{print $1}')
+        if [ $? -ne 0 ]; then
+            logf "Failed to write $dst, exit"
+        fi
+
+        logi "Finish writing to $dst, sha256sum: $checksum"
+        echo "$checksum" > "$dst.sha256sum"
+
+        logi "Waiting for next volume"
+        local sig
+        sig=$(cat "$signal_channel")
+        if [ "$sig" = "DONE" ]; then
+            logi "Receive DONE signal, exit"
+            exit 0
+        fi
+
+        vol_num=$((vol_num + 1))
+    done
+}
+
+do_restore() {
+    echo
+}
+
+do_change_volume() {
+    echo
+}
+
+case "$cmd" in
+backup)
+    do_backup "$@"
+    ;;
+__recv)
+    do_recv "$@"
+    ;;
+restore)
+    do_restore
+    ;;
+__change_volume)
+    do_change_volume
+    ;;
+*)
+    usage
+    ;;
+esac
