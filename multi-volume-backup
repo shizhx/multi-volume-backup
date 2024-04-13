@@ -162,74 +162,85 @@ wait_user_confirm() {
     done
 }
 
-get_next_backup_volume() {
-    # check environment
-    [ -n "$MVB_DST_PREFIX" ] || logf "MVB_DST_PREFIX CANNOT be empty"
-    [ -n "$MVB_VOL_SIZE" ] || logf "MVB_VOL_SIZE CANNOT be empty"
-    [ -n "$MVB_DATA_CH" ] || logf "MVB_DATA_CH CANNOT be empty"
+backup_next_volume() {
+    # get arguments from environment variables
+    local dst_prefix=${MVB_DST_PREFIX:-""}
+    local vol_size=${MVB_VOL_SIZE:-""}
+    local data_channel=${MVB_DATA_CH:-""}
+    local signal_channel=${MVB_SIGNAL_CH:-""}
+    local tar_fd=${TAR_FD:-""}
 
-    {
-        local dst_prefix=$MVB_DST_PREFIX
-        local dst_dir
-        dst_dir=$(dirname "$dst_prefix")
+    # check arguments
+    [ -n "$dst_prefix" ] || logf "MVB_DST_PREFIX CANNOT be empty"
+    [ -n "$vol_size" ] || logf "MVB_VOL_SIZE CANNOT be empty"
+    [ -n "$data_channel" ] || logf "MVB_DATA_CH CANNOT be empty"
+    [ -n "$signal_channel" ] || logf "MVB_SIGNAL_CH CANNOT be empty"
+    [ -n "$tar_fd" ] || logf "TAR_FD SHOULD NOT be empty"
 
-        local size_num=${MVB_VOL_SIZE%?}
-        local size_unit=${MVB_VOL_SIZE:-1}
-        local avail
+    local dst_dir
+    dst_dir=$(dirname "$dst_prefix")
 
-        # get availiable space of dest
-        avail=$(df -B"$size_unit" "$dst_dir" | awk 'NR==2 {print $4}')
-        avail=${avail%?}
-        if [ -z "$avail" ]; then
-            loge "Failed to get availiable space of $dst_dir"
-            wait_user_confirm
-        elif [ "$avail" -le "$size_num" ]; then
-            loge "Availiable space of $dst_dir too small"
-            wait_user_confirm
-        fi
-    } 1>&2
+    local size_num=${vol_size%?}
+    local size_unit=${vol_size:-1}
+    local avail
 
-    echo "$MVB_DATA_CH"
+    # get availiable space of dest
+    # FIXME: maybe we should use stat command instead
+    avail=$(df -B"$size_unit" "$dst_dir" | awk 'NR==2 {print $4}')
+    avail=${avail%?}
+    if [ -z "$avail" ]; then
+        loge "Failed to get availiable space of $dst_dir"
+        wait_user_confirm
+    elif [ "$avail" -le "$size_num" ]; then
+        loge "Availiable space of $dst_dir too small"
+        wait_user_confirm
+    fi
+
+    # write next volume name to tar
+    echo "$data_channel" >&"$tar_fd"
+    # resume writer
+    echo "RESUME" > "$signal_channel"
     return 0
 }
 
-get_next_restore_volume() {
-    local prefix=${TAR_ARCHIVE%-*}
-    local suffix=${TAR_ARCHIVE##*-}
+restore_next_volume() {
+    local tar_archive=${TAR_ARCHIVE:-""}
+    local tar_volume=${TAR_VOLUME:-""}
+    local tar_fd=${TAR_FD:-""}
+
+    [ -n "$tar_archive" ] || logf "TAR_ARCHIVE SHOULD NOT be empty"
+    [ -n "$tar_volume" ] || logf "TAR_VOLUME SHOULD NOT be empty"
+    [ -n "$tar_fd" ] || logf "TAR_FD SHOULD NOT be empty"
+
+    local prefix=${tar_archive%-*}
+    local suffix=${tar_archive##*-}
     local ext=${suffix#*.}
-    local next_vol_name="${prefix}${TAR_VOLUME}.${ext}"
+    local next_vol_name="${prefix}${tar_volume}.${ext}"
 
-    {
-        while ! [ -r "$next_vol_name" ]; do
-            loge "$next_vol_name is not readable"
-            wait_user_confirm
-        done
-    } 1>&2
+    while ! [ -r "$next_vol_name" ]; do
+        loge "$next_vol_name is not readable"
+        wait_user_confirm
+    done
 
-    echo "$next_vol_name"
+    echo "$next_vol_name" >&"$tar_fd"
 }
 
 do_change_volume() {
     log_tag="change_volume"
-    local next_vol_name
+    local tar_volume=${TAR_VOLUME:-"unknown"}
 
-    logi "Preparing volume $TAR_VOLUME"
-
+    logi "Preparing volume $tar_volume"
     case "$TAR_SUBCOMMAND" in
     -c)
-        next_vol_name=$(get_next_backup_volume)
-        # resume writer
-        echo "RESUME" > "$MVB_SIGNAL_CH"
+        backup_next_volume
         ;;
     -d|-x|-t)
-        next_vol_name=$(get_next_restore_volume)
+        restore_next_volume
         ;;
     *)
         exit 1
         ;;
     esac
-
-    echo "$next_vol_name" >&"$TAR_FD"
 }
 
 case "$cmd" in
