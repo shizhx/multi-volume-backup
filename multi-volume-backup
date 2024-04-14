@@ -109,8 +109,15 @@ do_backup() {
     # notify writer
     logi "Notify backgroud writer to quit"
     echo "QUIT" | timeout 10 tee "$signal_channel" > /dev/null
-    timeout 10 wait "$writer_pid"
-    if [ $? -eq 124 ]; then
+    local waiter_exited=0
+    for (( i=1; i<=10; i++ )); do
+        if ! kill "$writer_pid"; then
+            waiter_exited=1
+            break
+        fi
+        sleep 1
+    done
+    if [ $waiter_exited -eq 0 ]; then
         logi "Writer not exit after timeout, kill it(pid=$writer_pid)"
         kill -9 "$writer_pid"
     fi
