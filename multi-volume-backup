@@ -132,7 +132,7 @@ do_write() {
         local dst="${dst_prefix}${vol_num}.tar"
         logi "Begin to receive data from $data_channel and write $dst"
         local checksum
-        checksum=$(cat "$data_channel" | tee "$dst" | sha256sum | awk '{print $1}')
+        checksum=$(tee "$dst" --output-error=exit < "$data_channel" | sha256sum | awk '{print $1}')
         if [ $? -ne 0 ]; then
             # if cat process exit abnormally, tar process will receive SGPIPE signal then exit
             logf "Failed to write $dst, exit"
@@ -158,12 +158,12 @@ do_restore() {
     local dst=$2
     local level=$3
 
-    [ -z "$src" ] || usage
-    [ -z "$dst" ] || usage
-    [ -z "$level" ] || usage
+    [ -n "$src" ] || usage
+    [ -n "$dst" ] || usage
+    [ -n "$level" ] || usage
 
     export MVB_CMD="__change_volume"
-    tar -xM -v -F "$prog" -f "$src" "$dst"
+    tar -xM -v "--strip-components=$level" -F "$prog" -f "$src" -C "$dst"
 }
 
 wait_user_confirm() {
@@ -196,7 +196,7 @@ backup_next_volume() {
     dst_dir=$(dirname "$dst_prefix")
 
     local size_num=${vol_size%?}
-    local size_unit=${vol_size:-1}
+    local size_unit=${vol_size: -1}
     local avail
 
     # get availiable space of dest
@@ -230,7 +230,7 @@ restore_next_volume() {
     local prefix=${tar_archive%-*}
     local suffix=${tar_archive##*-}
     local ext=${suffix#*.}
-    local next_vol_name="${prefix}${tar_volume}.${ext}"
+    local next_vol_name="${prefix}-${tar_volume}.${ext}"
 
     while ! [ -r "$next_vol_name" ]; do
         loge "$next_vol_name is not readable"
