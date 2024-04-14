@@ -18,14 +18,15 @@ usage() {
 
     echo "Usage:"
     echo "  $prog_name backup <source path> <dest path with volume name prefix> <volume size> <snar file path>"
-    echo "  $prog_name restore <first volume path> <dest path>"
+    echo "  $prog_name restore <first volume path> <dest path> <strip path level>"
     echo
     echo "Note:"
-    echo "  snar file record the filelist to achive incremental backup"
+    echo "  - snar file is used to save filelist to achieve incremental backup"
+    echo "  - strip path level indicates how many levels of paths need to be deleted when extract"
     echo
     echo "Example:"
     echo "  multi-volume-backup backup /data /mnt/bak/full_backup- 100G /data.snar"
-    echo "  multi-volume-backup restore /mnt/bak/full_backup-1.tar /data"
+    echo "  multi-volume-backup restore /mnt/bak/full_backup-1.tar /data 1"
     exit 1
 }
 
@@ -55,7 +56,7 @@ do_backup() {
     log_tag="backup-main"
     local src=$1
     local dst_prefix=$2
-    local size=$3
+    local vol_size=$3
     local snar=$4
 
     # check argument
@@ -65,96 +66,110 @@ do_backup() {
     dst_dir=$(dirname "$dst_prefix")
     snar_dir=$(dirname "$snar")
 
-    [ -d "$src" ] || logf "Invalid source path: $src"
-    [ -d "$dst_dir" ] || logf "Invalid dest path $dst_prefix"
-    [ -n "$size" ] || logf "Invalid volume size: $size"
-    [ -d "$snar_dir" ] || logf "Invalid snar file: $snar"
+    [ -d "$src" ] || logf "Invalid source path($src): not a directory"
+    [ -d "$dst_dir" ] || logf "Invalid dest path($dst_prefix): parent directory not exists"
+    [ -n "$vol_size" ] || logf "Invalid volume size: CANNOT be empty"
+    [ -d "$snar_dir" ] || logf "Invalid snar path($snar): parent directory not exists"
 
     # create pipe to recv data and signal
     mkdir -p "$MVB_WORK_DIR" || logf "Failed to create workdir: $MVB_WORK_DIR"
-    local data_channel="$MVB_WORK_DIR/mv-backup-data"
-    local signal_channel="$MVB_WORK_DIR/mv-backup-signal"
+    local data_channel="$MVB_WORK_DIR/mvb-data-ch"
+    local signal_channel="$MVB_WORK_DIR/mvb-signal-ch"
+    rm -f "$data_channel" "$signal_channel"
     mkfifo "$data_channel" || logf "Failed to create data channel: $data_channel"
     mkfifo "$signal_channel" || logf "Failed to create signal channel: $signal_channel"
 
     # writer
-    logi "Starting backgroud writer to receive data and write to $dst_dir"
-    "$prog" __recv "$dst_prefix" "$data_channel" "$signal_channel" &
+    logi "Starting backgroud writer to receive data from tar and write to $dst_dir"
+    trap 'kill $writer_pid' EXIT
+    "$prog" __write "$dst_prefix" "$data_channel" "$signal_channel" &
     writer_pid=$!
 
     if ! timeout 10 cat "$signal_channel"; then
-        logf "Failed to start backgroud writer"
+        logf "Failed to start backgroud writer: receive signal from $signal_channel timeout"
     fi
 
     # reader
-    logi "Starting reader(tar) to read data and write to data channel"
+    logi "Starting reader(tar) to read files and write to data channel $data_channel"
     # use environment variables to pass arguments to tar script
     export MVB_CMD="__change_volume"
     export MVB_DST_PREFIX="$dst_prefix"
-    export MVB_VOL_SIZE="$size"
+    export MVB_VOL_SIZE="$vol_size"
     export MVB_DATA_CH="$data_channel"
     export MVB_SIGNAL_CH="$signal_channel"
-    tar -cM -v -H posix -L "$size" -F "$prog" -f "$data_channel" -g "$snar" "$src"
+    local ret
+    tar -cM -v -H posix -L "$vol_size" -F "$prog" -f "$data_channel" -g "$snar" "$src"
+    ret=$?
+    if [ $ret -ne 0 ]; then
+        loge "Failed to backup: tar exit with code $ret"
+    else
+        logi "Success to backup"
+    fi
     
     # notify writer
-    logi "tar process exit with code $?, notify backgroud writer"
-    echo "EXIT" | timeout 10 tee "$signal_channel"
+    logi "Notify backgroud writer to quit"
+    echo "QUIT" | timeout 10 tee "$signal_channel"
     if ! timeout 10 wait "$writer_pid"; then
         logi "Writer not exit after timeout, kill it(pid=$writer_pid)"
         kill -9 "$writer_pid"
     fi
 
     logi "Good Bye!"
+    exit "$ret"
 }
 
-do_recv() {
+do_write() {
     log_tag="backup-writer"
     local dst_prefix=$1
     local data_channel=$2
     local signal_channel=$3
     local vol_num=1
 
-    logi "Writer worker started, notify main process"
+    logi "Writer started, notify main process"
     echo "WRITER_STARTED" > "$signal_channel" || logf "Failed to notify main process, exit"
 
     while true; do
         local dst="${dst_prefix}${vol_num}.tar"
-        logi "Begin to receive data and write to $dst"
+        logi "Begin to receive data from $data_channel and write $dst"
         local checksum
-        checksum=$(tee "$dst" < "$data_channel" | sha256sum | awk '{print $1}')
+        checksum=$(cat "$data_channel" | tee "$dst" | sha256sum | awk '{print $1}')
         if [ $? -ne 0 ]; then
+            # if cat process exit abnormally, tar process will receive SGPIPE signal then exit
             logf "Failed to write $dst, exit"
         fi
 
-        logi "Finish writing to $dst, sha256sum: $checksum"
+        logi "Success to write $dst, sha256sum: $checksum"
         echo "$checksum" > "$dst.sha256sum"
 
-        logi "Waiting for next volume signal"
+        vol_num=$((vol_num + 1))
+        logi "Waiting for volume $vol_num"
         local sig
         sig=$(cat "$signal_channel")
-        if [ "$sig" = "EXIT" ]; then
-            logi "Receive EXIT signal, exit"
+        if [ "$sig" = "QUIT" ]; then
+            logi "Received QUIT signal, exit"
             exit 0
         fi
 
-        vol_num=$((vol_num + 1))
     done
 }
 
 do_restore() {
-    local src="$1"
-    local dst="$2"
+    local src=$1
+    local dst=$2
+    local level=$3
 
     [ -z "$src" ] || usage
     [ -z "$dst" ] || usage
+    [ -z "$level" ] || usage
 
+    export MVB_CMD="__change_volume"
     tar -xM -v -F "$prog" -f "$src" "$dst"
 }
 
 wait_user_confirm() {
     local answer
-    echo "Please mount a new disk/tape to correct mountpoint."
     while true; do
+        echo "Please mount a new disk/tape to the same mountpoint."
         read -r -p "Are new disk/tape mounted?(Y/n): " answer
         if [ "$answer" = "Y" ]; then
             return 0
@@ -185,7 +200,7 @@ backup_next_volume() {
     local avail
 
     # get availiable space of dest
-    # FIXME: maybe we should use stat command instead
+    # FIXME: maybe we should use `stat command instead
     avail=$(df -B"$size_unit" "$dst_dir" | awk 'NR==2 {print $4}')
     avail=${avail%?}
     if [ -z "$avail" ]; then
@@ -247,8 +262,8 @@ case "$cmd" in
 backup)
     do_backup "$@"
     ;;
-__recv)
-    do_recv "$@"
+__write)
+    do_write "$@"
     ;;
 restore)
     do_restore "$@"
