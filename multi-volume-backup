@@ -108,8 +108,9 @@ do_backup() {
     
     # notify writer
     logi "Notify backgroud writer to quit"
-    echo "QUIT" | timeout 10 tee "$signal_channel"
-    if ! timeout 10 wait "$writer_pid"; then
+    echo "QUIT" | timeout 10 tee "$signal_channel" > /dev/null
+    timeout 10 wait "$writer_pid"
+    if [ $? -eq 124 ]; then
         logi "Writer not exit after timeout, kill it(pid=$writer_pid)"
         kill -9 "$writer_pid"
     fi
