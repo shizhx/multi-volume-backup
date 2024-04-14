@@ -116,6 +116,8 @@ do_backup() {
     fi
 
     logi "Good Bye!"
+    # cancel trap
+    trap - EXIT
     exit "$ret"
 }
 
