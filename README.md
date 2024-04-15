@@ -16,6 +16,13 @@ I have a large number of files stored in my NAS (OpenMediaVault). To ensure data
 
 After some searching, I didn't find any ready-made solutions, so I wrote a script based on `tar` to accomplish the above functions.
 
+## Pre Requisite
+
+In addition to the common commands, the following commands are required:
+
+- `mkfifo`
+- `tee`
+
 ## Usage
 
 ```bash
