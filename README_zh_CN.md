@@ -18,3 +18,17 @@
 
 ## 用法
 
+```bash
+Usage:
+  multi-volume-backup backup <source path> <dest path with volume name prefix> <volume size> <snar file path>
+  multi-volume-backup restore <first volume path> <dest path> <strip path level>
+
+Note:
+  - snar file is used to save filelist to achieve incremental backup
+  - strip path level indicates how many levels of paths need to be deleted when extract
+
+Example:
+  multi-volume-backup backup /data /mnt/bak/full_backup- 100G /data.snar
+  multi-volume-backup restore /mnt/bak/full_backup-1.tar /data 1
+```
+
